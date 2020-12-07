@@ -12,7 +12,7 @@ class Performance:
         print("Sharp ratio: ", sharp)
         
 class VIX:
-    def __int__(result, ohlc: str):
+    def __init__(self, result, ohlc: str):
         vix=yf.download('^VIX')
         result_vix = result.join(vix, on=['Date'])
         mod = sm.OLS(result_vix['Net Profit'], sm.add_constant(result_vix[ohlc]))
