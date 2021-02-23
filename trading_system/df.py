@@ -9,20 +9,22 @@ import time
 from Program import *
 
 # Count the total symbols that are requested market data
-account = 'DF3354047'
+glob_account = account = "DU3354048"
 total_requests = 0
 id = 1
 order_id = 1
 sleep_interval = 0.1
-dollars = 1000
-trading_hour = 22
+dollars = 2000
+trading_hour = 10
 trading_minute_start = 0
 trading_minute_end = 59
-liquidate_hour = 18
+liquidate_hour = 15
 liquidate_minute = 0
 long_short_position_number_limit = 5
+far_order_criteria = 0.999
 num_order_limit = 1
 position_end = False
+open_order_end = False
 
 import datetime
 # BDay is business day, not birthday...
@@ -63,6 +65,7 @@ class TradingAPI(EWrapper, EClient):
         self.predictions = {}
         self.market_price = {}
         self.open_order_end = False
+        sellf.position_end = False
 
     def historicalData(self, reqId, bar):
 
@@ -74,10 +77,12 @@ class TradingAPI(EWrapper, EClient):
     def position(self, account: str, contract: Contract, position: float,
                  avgCost: float):
         super().position(account, contract, position, avgCost)
-        # print("Position.", "Account:", account, "Symbol:", contract.symbol, "SecType:",
+        # print("Position.", "Account:", account, "Symbol:", contract.symbol,
+        #       "SecType:",
         #       contract.secType, "Currency:", contract.currency,
         #       "Position:", position, "Avg cost:", avgCost)
-        if contract.SecType == 'STK':
+
+        if contract.secType == 'STK' and account == glob_account:
             self.positions[contract.symbol] = position
 
     # ! [position]
@@ -86,7 +91,8 @@ class TradingAPI(EWrapper, EClient):
     # ! [positionend]
     def positionEnd(self):
         super().positionEnd()
-        print("PositionEnd")
+        self.position_end = True
+        # print("PositionEnd")
 
     # ! [positionend]
 
@@ -117,20 +123,21 @@ class TradingAPI(EWrapper, EClient):
         super().orderStatus(orderId, status, filled, remaining,
                             avgFillPrice, permId, parentId, lastFillPrice,
                             clientId, whyHeld, mktCapPrice)
-        print("OrderStatus. Id:", orderId, "Status:", status, "Filled:",
-              filled,
-              "Remaining:", remaining, "AvgFillPrice:", avgFillPrice,
-              "PermId:", permId, "ParentId:", parentId, "LastFillPrice:",
-              lastFillPrice, "ClientId:", clientId, "WhyHeld:",
-              whyHeld, "MktCapPrice:", mktCapPrice)
+        # print("OrderStatus. Id:", orderId, "Status:", status, "Filled:",
+        #       filled,
+        #       "Remaining:", remaining, "AvgFillPrice:", avgFillPrice,
+        #       "PermId:", permId, "ParentId:", parentId, "LastFillPrice:",
+        #       lastFillPrice, "ClientId:", clientId, "WhyHeld:",
+        #       whyHeld, "MktCapPrice:", mktCapPrice)
         if remaining == 0:
             del self.open_orders[orderId]
 
-    # ! [orderstatus]
+            # ! [orderstatus]
 
     @iswrapper
     def cancelOrder(self, orderId: OrderId):
         super().cancelOrder(orderId)
+        print(f"Order canceled for orderId: {orderId}")
         del self.open_orders[orderId]
 
     @iswrapper
@@ -138,15 +145,15 @@ class TradingAPI(EWrapper, EClient):
     def openOrder(self, orderId: OrderId, contract: Contract, order: Order,
                   orderState: OrderState):
         super().openOrder(orderId, contract, order, orderState)
-        print("OpenOrder. PermId: ", order.permId, "ClientId:", order.clientId,
-              " OrderId:", orderId,
-              "Account:", order.account, "Symbol:", contract.symbol,
-              "SecType:", contract.secType,
-              "Exchange:", contract.exchange, "Action:", order.action,
-              "OrderType:", order.orderType,
-              "TotalQty:", order.totalQuantity, "CashQty:", order.cashQty,
-              "LmtPrice:", order.lmtPrice, "AuxPrice:", order.auxPrice,
-              "Status:", orderState.status)
+        # print("OpenOrder. PermId: ", order.permId, "ClientId:", order.clientId,
+        #       " OrderId:", orderId,
+        #       "Account:", order.account, "Symbol:", contract.symbol,
+        #       "SecType:", contract.secType,
+        #       "Exchange:", contract.exchange, "Action:", order.action,
+        #       "OrderType:", order.orderType,
+        #       "TotalQty:", order.totalQuantity, "CashQty:", order.cashQty,
+        #       "LmtPrice:", order.lmtPrice, "AuxPrice:", order.auxPrice,
+        #       "Status:", orderState.status)
 
         order.contract = contract
         if order.contract.secType == 'STK':
@@ -158,7 +165,6 @@ class TradingAPI(EWrapper, EClient):
     def openOrderEnd(self):
         super().openOrderEnd()
         self.open_order_end = True
-        print("End open orders")
 
 
 app = TradingAPI()
@@ -223,24 +229,18 @@ def compute():
 def req_open_orders():
     global app
     while True:
-        print('Req open orders')
-        time.sleep(1)
-
+        time.sleep(3)
         app.open_order_end = False
         app.reqOpenOrders()
 
 
 def request_market_data():
-    global id_equity_info_mp, total_requests, id, symbols
+    global app, id_equity_info_mp, total_requests, id, symbols
     while True:
         time.sleep(sleep_interval)
 
         requested_symbols = [
             value.symbol for value in id_equity_info_mp.values()
-        ]
-        symbols_valid_last = [
-            value.symbol for value in id_equity_info_mp.values()
-            if value.last > 0
         ]
 
         if id <= len(symbols):
@@ -265,28 +265,35 @@ def request_market_data():
                 id += 1
 
 
+def req_positions():
+    global app
+    while True:
+        time.sleep(3)
+        app.position_end = False
+        app.reqPositions()
+
+
 def count_long_short_positions():
     long_position_number = 0
     short_position_number = 0
     for position in app.positions.values():
         if position > 0:
             long_position_number += 1
-        elif position < 0:
-            short_position_number -= 1
+        if position < 0:
+            short_position_number += 1
     return long_position_number, short_position_number
 
 
 def get_num_buy_and_sell_orders():
     global app
-    num_sell_orders = 0
     num_buy_orders = 0
-    if app.open_order_end:
-        for id, order in app.open_orders.items():
-            if order.action == 'BUY':
-                num_buy_orders += 1
-            else:
-                num_sell_orders += 1
+    num_sell_orders = 0
 
+    for id, order in app.open_orders.items():
+        if order.action == 'BUY':
+            num_buy_orders += 1
+        if order.action == 'SELL':
+            num_sell_orders += 1
     return num_buy_orders, num_sell_orders
 
 
@@ -297,13 +304,14 @@ def cancel_other_orders(symbol, action, limit_price):
     input argument. For orders with the same symbol, cancel far orders.
     return True if the wanted order already existed."""
     global app
-    if app.open_order_end:
-        for id, order in app.open_orders.items():
+    if not app.open_order_end:
+        for id in list(app.open_orders.keys()):
+            order = app.open_orders[id]
             if order.action == action:
                 if order.contract.symbol != symbol:
-                    app.cancelOrder(id)
+                    cancel_orders(id)
 
-    time.sleep(1)
+        time.sleep(1)
 
 
 def check_order_existed(symbol, action):
@@ -312,28 +320,49 @@ def check_order_existed(symbol, action):
         for open_id in app.open_orders:
             if (
                     app.open_orders[open_id].contract.symbol == symbol and
-                    app.open_orders[open_id].contract.action == action
+                    app.open_orders[open_id].action == action
 
             ):
                 return True
     return False
 
 
+def total_position_violation_check():
+    long_position_number, short_position_number = (
+        count_long_short_positions()
+    )
+    if long_position_number > long_short_position_number_limit:
+        return True
+
+    if short_position_number > long_short_position_number_limit:
+        return True
+
+
 def liquidate_positions():
     global app, order_id, num_order_limit
+
     while True:
         time.sleep(1)
+
         now = datetime.datetime.now()
-        if now.hour < liquidate_hour:
+        if not app.open_order_end or not app.position_end:
+            continue
+
+        if (
+                now.hour < liquidate_hour and
+                not total_position_violation_check()
+        ):
             continue
 
         long_position_number, short_position_number = (
             count_long_short_positions()
         )
-        num_sell_orders, num_buy_orders = get_num_buy_and_sell_orders()
+        num_buy_orders, num_sell_orders = get_num_buy_and_sell_orders()
+        # print(f'num_buy_orders {num_buy_orders}')
+        # print(f'num_sell_orders {num_sell_orders}')
         for symbol, position in app.positions.items():
-
-            for value in id_equity_info_mp.values():
+            values_ls = list(id_equity_info_mp.values())
+            for value in values_ls:
                 if (
                         value.symbol == symbol and
                         value.bid > 0 and value.ask > 0 and value.last > 0
@@ -347,7 +376,7 @@ def liquidate_positions():
 
                     ):
                         place_order(symbol, "BUY", value.last,
-                                    value.bid)
+                                    value.bid, position)
 
                     if (
                             position > 0 and
@@ -355,7 +384,7 @@ def liquidate_positions():
                             num_sell_orders < num_order_limit
                     ):
                         place_order(symbol, "SELL", value.last,
-                                    value.ask)
+                                    value.ask, position)
 
 
 def risk_check_position(value: equity_info, action: str):
@@ -363,23 +392,27 @@ def risk_check_position(value: equity_info, action: str):
     long_position_number, short_position_number = (
         count_long_short_positions()
     )
+    # print(long_position_number, short_position_number)
     valid = (
             value.symbol not in app.positions and value.last > 0
             and value.bid > 0 and value.ask > 0
     )
-
+    if not valid:
+        return False
     if action == 'SELL':
-        return (
-                valid and
+        result = (
                 long_position_number >= short_position_number and
                 short_position_number < long_short_position_number_limit
         )
+        # print(f'position risk check symbol {value.symbol}, action {action}, result {result}')
+        return result
     if action == 'BUY':
-        return (
-                valid and
+        result = (
                 long_position_number <= short_position_number and
                 long_position_number < long_short_position_number_limit
         )
+        # print(f'position risk check symbol {value.symbol}, action {action}, result {result}')
+        return result
 
 
 def manage_orders():
@@ -392,7 +425,6 @@ def manage_orders():
                 now.hour == trading_hour and
                 trading_minute_start <= now.minute <= trading_minute_end
         ):
-            print("Trading time")
             id_equity_info_mp = (
                 collections.OrderedDict(sorted(
                     id_equity_info_mp.items(),
@@ -421,8 +453,10 @@ def manage_orders():
                     pass
 
 
-def place_order(symbol, action, last_price, limit_price):
+def place_order(symbol, action, last_price, limit_price, position=None):
     global app, order_id, dollars
+    if last_price < 0 or limit_price < 0:
+        return
     if not app.open_order_end:
         return
 
@@ -439,13 +473,28 @@ def place_order(symbol, action, last_price, limit_price):
     contract.currency = 'USD'
     order = Order()
     order.action = action
-    order.tif = "GTC"
+    order.tif = "DAY"
     order.orderType = "LMT"
-    order.totalQuantity = int(round(dollars / last_price))
     order.lmtPrice = limit_price
+    if position is None:
+        order.totalQuantity = int(round(dollars / last_price))
+    else:
+        order.totalQuantity = abs(position)
+    order.account = account
     app.placeOrder(order_id, contract, order)
     order_id += 1
-    time.sleep(1)
+    app.position_end = False
+    app.reqPositions()
+    app.open_order_end = False
+    app.reqOpenOrders()
+    time.sleep(2)
+
+
+def cancel_orders(id):
+    global app
+    app.cancelOrder(id)
+    app.open_order_end = False
+    app.reqOpenOrders()
 
 
 def cancel_far_orders():
@@ -454,23 +503,29 @@ def cancel_far_orders():
         time.sleep(sleep_interval)
         if not app.open_order_end:
             continue
-        for id, order in app.open_orders.items():
+        for id in list(app.open_orders):
+            order = app.open_orders[id]
             for value in id_equity_info_mp.values():
                 if value.symbol == order.contract.symbol:
+
                     if (
                             (order.action == 'BUY' and value.bid > 0 and
-                             order.lmtPrice < value.bid * .997) or
+                             order.lmtPrice < value.bid * far_order_criteria) or
                             value.bid < 0
                     ):
-                        app.cancelOrder(id)
+                        cancel_orders(id)
+                        print(
+                            f'cancel order {id}, symbol{value.symbol}, side {order.action}')
                         break
 
                     if (
                             (order.action == 'SELL' and value.ask > 0 and
-                             order.lmtPrice > value.ask / 0.997) or
+                             order.lmtPrice > value.ask / far_order_criteria) or
                             value.ask < 0
                     ):
-                        app.cancelOrder(id)
+                        print(
+                            f'cancel order {id}, symbol{value.symbol}, side {order.action}')
+                        cancel_orders(id)
                         break
 
 
@@ -504,6 +559,12 @@ def status_monitor():
         if choice == '5':
             print(f'All positions {app.positions}')
 
+            long_position_number, short_position_number = count_long_short_positions()
+            print(
+                f'long_position_number {long_position_number} \n'
+                f'short_position_number {short_position_number} \n'
+            )
+
         if choice == '6':
             for value in id_equity_info_mp.values():
                 print(
@@ -522,6 +583,9 @@ marketdata_thread.start()
 
 req_open_orders_thread = threading.Thread(target=req_open_orders)
 req_open_orders_thread.start()
+
+req_positions_thread = threading.Thread(target=req_positions)
+req_positions_thread.start()
 
 compute_thread = threading.Thread(target=compute)
 compute_thread.start()
@@ -546,6 +610,5 @@ cancel_far_order_thread.join()
 manage_orders_thread.join()
 liquidate_positions_thread.join()
 
-app.reqPositions()
 # app.disconnect()
 print("Program ends!!!")
