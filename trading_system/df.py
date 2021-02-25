@@ -7,32 +7,38 @@ from ibapi.contract import Contract
 import threading
 import time
 from Program import *
+import io
 
+error_stream = io.StringIO()
 # Count the total symbols that are requested market data
 glob_account = account = "DU3354048"
 total_requests = 0
 id = 1
+market_data_id = 1
 order_id = 1
 sleep_interval = 0.1
 dollars = 2000
-trading_hour = 10
-trading_minute_start = 0
+trading_hour_start = 9
+trading_hour_end = 12
+trading_minute_start = 20
 trading_minute_end = 59
-liquidate_hour = 15
+liquidate_hour_start = 15
+liquidate_hour_end = 18
 liquidate_minute = 0
 long_short_position_number_limit = 5
 far_order_criteria = 0.999
 num_order_limit = 1
 position_end = False
 open_order_end = False
+not_trade_symbols = ['SPY']
 
 import datetime
 # BDay is business day, not birthday...
 from pandas.tseries.offsets import BDay
 
 today = datetime.datetime.today()
-yesterday = today - BDay(1)
-yesterday = yesterday.strftime('%Y%m%d')
+prev_bday = today - BDay(1)
+prev_bday = prev_bday.strftime('%Y%m%d')
 
 df_params = pd.read_csv('/Users/d567533/DF/params.csv')
 df_params['all_params'] = df_params[['const', 'x1', 'x2']].values.tolist()
@@ -44,6 +50,8 @@ params_mp0 = df_params0.set_index('symbol')['all_params'].to_dict()
 id_equity_info_mp = {}
 symbols = list(df_params.symbol)
 symbols.insert(0, 'SPY')
+
+requested_symbols = []
 
 
 class equity_info:
@@ -65,11 +73,11 @@ class TradingAPI(EWrapper, EClient):
         self.predictions = {}
         self.market_price = {}
         self.open_order_end = False
-        sellf.position_end = False
+        self.position_end = False
 
     def historicalData(self, reqId, bar):
 
-        if bar.date == yesterday:
+        if bar.date == prev_bday:
             id_equity_info_mp[reqId].prev_close = bar.close
 
     @iswrapper
@@ -166,6 +174,13 @@ class TradingAPI(EWrapper, EClient):
         super().openOrderEnd()
         self.open_order_end = True
 
+    @iswrapper
+    def error(self, reqId: TickerId, errorCode: int, errorString: str):
+        #super().error(reqId, errorCode, errorString)
+        global error_stream
+        error_stream.write(f"Error. Id:, {reqId}, Code: {errorCode}, Msg: {errorString}\n")
+
+
 
 app = TradingAPI()
 
@@ -175,8 +190,19 @@ def run_loop():
     app.run()
 
 
-def compute():
+def sort_equity():
     global id_equity_info_mp
+    id_equity_info_mp = (
+        collections.OrderedDict(sorted(
+            id_equity_info_mp.items(),
+            key=lambda item: item[1].predict
+        ))
+    )
+    return id_equity_info_mp
+
+
+def compute():
+    global id_equity_info_mp, requested_symbols
     while True:
 
         time.sleep(sleep_interval)
@@ -204,19 +230,28 @@ def compute():
                                     params_mp[symbol][2] * pricing_error
                             )
 
-        if len(id_equity_info_mp) >= 91:
-            id_equity_info_mp = (
-                collections.OrderedDict(sorted(
-                    id_equity_info_mp.items(),
-                    key=lambda item: item[1].predict
-                ))
-            )
+        requested_symbols = [
+            value.symbol for value in id_equity_info_mp.values()
+        ]
+
+
+def remove_symbol_from_market_data():
+    global id_equity_info_mp
+    while True:
+        time.sleep(1)
+        now = datetime.datetime.now()
+        if (
+                len(id_equity_info_mp) >= 91 and
+                trading_hour_start <= now.hour <= trading_hour_end
+        ):
+            id_equity_info_mp = sort_equity()
             for i in range(45, len(id_equity_info_mp)):
                 # print("Deleting ...")
                 key = list(id_equity_info_mp.keys())[i]
                 if (
                         id_equity_info_mp[key] != 'SPY' and
                         id_equity_info_mp[key].last != -2
+
                 ):
                     # print(f'delete symbol {id_equity_info_mp[key].symbol} '
                     #       f' last price {id_equity_info_mp[key].last}'
@@ -234,19 +269,34 @@ def req_open_orders():
         app.reqOpenOrders()
 
 
-def request_market_data():
-    global app, id_equity_info_mp, total_requests, id, symbols
+def request_market_data(symbol):
+    global app, id_equity_info_mp, total_requests, market_data_id, requested_symbols
+
+    if not symbol in requested_symbols:
+        contract = Contract()
+        contract.symbol = symbol
+        contract.secType = 'STK'
+        contract.exchange = 'SMART'
+        if symbol == 'CSCO':
+            contract.exchange = 'NASDAQ'
+
+        contract.currency = 'USD'
+        app.reqHistoricalData(
+            id, contract, '', '2 D', '1 day', 'TRADES', 1, 1, False, []
+        )
+        app.reqMktData(market_data_id, contract, '', False, False, [])
+        id_equity_info_mp[market_data_id] = equity_info(symbol)
+        market_data_id += 1
+        total_requests += 1
+
+
+def init_request_market_data():
+    global app, id_equity_info_mp, total_requests, market_data_id, symbols, requested_symbols
     while True:
         time.sleep(sleep_interval)
 
-        requested_symbols = [
-            value.symbol for value in id_equity_info_mp.values()
-        ]
-
-        if id <= len(symbols):
-
-            symbol = symbols[id - 1]
-            if symbol not in requested_symbols:  # and len(id_equity_info_mp) <= 80:
+        for symbol in symbols:
+            if symbol not in requested_symbols:
                 contract = Contract()
                 contract.symbol = symbol
                 contract.secType = 'STK'
@@ -256,13 +306,13 @@ def request_market_data():
 
                 contract.currency = 'USD'
                 app.reqHistoricalData(
-                    id, contract, '', '2 D', '1 day', 'TRADES', 1, 1, False, []
+                    market_data_id, contract, '', '2 D', '1 day', 'TRADES', 1, 1, False, []
                 )
-
-                app.reqMktData(id, contract, '', False, False, [])
+                app.reqMktData(market_data_id, contract, '', False, False, [])
+                id_equity_info_mp[market_data_id] = equity_info(symbol)
+                market_data_id += 1
                 total_requests += 1
-                id_equity_info_mp[id] = equity_info(symbol)
-                id += 1
+
 
 
 def req_positions():
@@ -297,7 +347,7 @@ def get_num_buy_and_sell_orders():
     return num_buy_orders, num_sell_orders
 
 
-def cancel_other_orders(symbol, action, limit_price):
+def cancel_other_orders(symbol, action):
     """Cancel not wanted orders.
 
     Cancel the same side orders that symbols are different from the
@@ -339,7 +389,7 @@ def total_position_violation_check():
 
 
 def liquidate_positions():
-    global app, order_id, num_order_limit
+    global app, order_id, num_order_limit, requested_symbols
 
     while True:
         time.sleep(1)
@@ -349,7 +399,8 @@ def liquidate_positions():
             continue
 
         if (
-                now.hour < liquidate_hour and
+                (
+                        now.hour < liquidate_hour_start or now.hour > liquidate_hour_end) and
                 not total_position_violation_check()
         ):
             continue
@@ -358,9 +409,11 @@ def liquidate_positions():
             count_long_short_positions()
         )
         num_buy_orders, num_sell_orders = get_num_buy_and_sell_orders()
-        # print(f'num_buy_orders {num_buy_orders}')
-        # print(f'num_sell_orders {num_sell_orders}')
+
         for symbol, position in app.positions.items():
+            if symbol not in requested_symbols:
+                request_market_data(symbol)
+                break
             values_ls = list(id_equity_info_mp.values())
             for value in values_ls:
                 if (
@@ -368,6 +421,7 @@ def liquidate_positions():
                         value.bid > 0 and value.ask > 0 and value.last > 0
                         and value.predict != -2
                 ):
+
 
                     if (
                             position < 0 and
@@ -422,20 +476,18 @@ def manage_orders():
         now = datetime.datetime.now()
         if (
                 len(id_equity_info_mp) >= 80 and
-                now.hour == trading_hour and
+                trading_hour_start <= now.hour <= trading_hour_end and
                 trading_minute_start <= now.minute <= trading_minute_end
         ):
-            id_equity_info_mp = (
-                collections.OrderedDict(sorted(
-                    id_equity_info_mp.items(),
-                    key=lambda item: item[1].predict
-                ))
-            )
+            id_equity_info_mp = sort_equity()
             for key in list(id_equity_info_mp):
                 try:
                     value = id_equity_info_mp[key]
-                    if risk_check_position(value, 'SELL'):
-                        cancel_other_orders(value.symbol, 'SELL', value.ask)
+                    if (
+                            risk_check_position(value, 'SELL') and
+                            value.symbol not in not_trade_symbols
+                    ):
+                        cancel_other_orders(value.symbol, 'SELL')
                         place_order(value.symbol, "SELL", value.last,
                                     value.ask)
                         break
@@ -445,8 +497,11 @@ def manage_orders():
             for key in reversed(list(id_equity_info_mp)):
                 try:
                     value = id_equity_info_mp[key]
-                    if risk_check_position(value, 'BUY'):
-                        cancel_other_orders(value.symbol, 'BUY', value.bid)
+                    if (
+                            risk_check_position(value, 'BUY') and
+                            value.symbol not in not_trade_symbols
+                    ):
+                        cancel_other_orders(value.symbol, 'BUY')
                         place_order(value.symbol, "BUY", value.last, value.bid)
                         break
                 except KeyError:
@@ -455,6 +510,7 @@ def manage_orders():
 
 def place_order(symbol, action, last_price, limit_price, position=None):
     global app, order_id, dollars
+
     if last_price < 0 or limit_price < 0:
         return
     if not app.open_order_end:
@@ -530,7 +586,7 @@ def cancel_far_orders():
 
 
 def status_monitor():
-    global app, symbols, id_equity_info_mp, id, total_requests
+    global app, symbols, id_equity_info_mp, id, total_requests, error_stream
     while True:
         # time.sleep(1)
         os.system('clear')
@@ -542,6 +598,8 @@ def status_monitor():
             '4 All open orders \n'
             '5 All stock positions \n'
             '6 id_equity_info_mp \n'
+            '7 Check symbol status \n'
+            '8 Show Error messages \n'
 
         )
         if choice == '1':
@@ -557,7 +615,9 @@ def status_monitor():
             print(f'All open orders  {app.open_orders}\n')
 
         if choice == '5':
-            print(f'All positions {app.positions}')
+            for symbol, position in app.positions.items():
+                if position != 0:
+                    print(f'{symbol} position {position}')
 
             long_position_number, short_position_number = count_long_short_positions()
             print(
@@ -570,6 +630,29 @@ def status_monitor():
                 print(
                     f'Symbol {value.symbol} last {value.last} predict {value.predict}')
 
+        if choice == '7':
+            symbol = input('Please inpute the symbol\n')
+            print(f'{symbol} is in symbols: {symbol in symbols}')
+            found = False
+
+            for id in id_equity_info_mp:
+                value = id_equity_info_mp[id]
+                if value.symbol == symbol:
+                    print(
+                        f'Symbol {value.symbol}'
+                        f' last {value.last}'
+                        f' bid {value.bid}'
+                        f' ask{value.ask}'
+                        f' predict {value.predict}'
+                    )
+                    found = True
+            if not found:
+                print(f'{symbol} is not in id_equity_info_mp')
+
+        if choice == '8':
+            print(error_stream.getvalue())
+            #print('Error', file=error_stream)
+
 
 app.connect('127.0.0.1', 7497, 123)
 time.sleep(sleep_interval)
@@ -578,7 +661,7 @@ time.sleep(sleep_interval)
 api_thread = threading.Thread(target=run_loop, daemon=True)
 api_thread.start()
 
-marketdata_thread = threading.Thread(target=request_market_data)
+marketdata_thread = threading.Thread(target=init_request_market_data)
 marketdata_thread.start()
 
 req_open_orders_thread = threading.Thread(target=req_open_orders)
