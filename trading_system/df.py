@@ -25,12 +25,13 @@ trading_minute_end = 59
 liquidate_hour_start = 15
 liquidate_hour_end = 18
 liquidate_minute = 0
-long_short_position_number_limit = 5
+long_short_position_number_limit = 10
 far_order_criteria = 0.999
 num_order_limit = 1
 position_end = False
 open_order_end = False
 not_trade_symbols = ['SPY']
+
 
 import datetime
 # BDay is business day, not birthday...
@@ -74,6 +75,7 @@ class TradingAPI(EWrapper, EClient):
         self.market_price = {}
         self.open_order_end = False
         self.position_end = False
+        self.last_trade_time = -1
 
     def historicalData(self, reqId, bar):
 
@@ -92,6 +94,7 @@ class TradingAPI(EWrapper, EClient):
 
         if contract.secType == 'STK' and account == glob_account:
             self.positions[contract.symbol] = position
+
 
     # ! [position]
 
@@ -139,6 +142,8 @@ class TradingAPI(EWrapper, EClient):
         #       whyHeld, "MktCapPrice:", mktCapPrice)
         if remaining == 0:
             del self.open_orders[orderId]
+            self.last_trade_time = time.time()
+            self.open_order_end = False
 
             # ! [orderstatus]
 
@@ -174,11 +179,11 @@ class TradingAPI(EWrapper, EClient):
         super().openOrderEnd()
         self.open_order_end = True
 
-    @iswrapper
-    def error(self, reqId: TickerId, errorCode: int, errorString: str):
-        #super().error(reqId, errorCode, errorString)
-        global error_stream
-        error_stream.write(f"Error. Id:, {reqId}, Code: {errorCode}, Msg: {errorString}\n")
+    # @iswrapper
+    # def error(self, reqId: TickerId, errorCode: int, errorString: str):
+    #     #super().error(reqId, errorCode, errorString)
+    #     global error_stream
+    #     error_stream.write(f"Error. Id:, {reqId}, Code: {errorCode}, Msg: {errorString}\n")
 
 
 
@@ -474,10 +479,13 @@ def manage_orders():
     while True:
         time.sleep(1)
         now = datetime.datetime.now()
+        long_position_number, short_position_number = (
+            count_long_short_positions()
+        )
         if (
-                len(id_equity_info_mp) >= 80 and
-                trading_hour_start <= now.hour <= trading_hour_end and
-                trading_minute_start <= now.minute <= trading_minute_end
+            len(id_equity_info_mp) >= 80 and
+            trading_hour_start <= now.hour <= trading_hour_end and
+            trading_minute_start <= now.minute <= trading_minute_end
         ):
             id_equity_info_mp = sort_equity()
             for key in list(id_equity_info_mp):
@@ -487,9 +495,16 @@ def manage_orders():
                             risk_check_position(value, 'SELL') and
                             value.symbol not in not_trade_symbols
                     ):
-                        cancel_other_orders(value.symbol, 'SELL')
-                        place_order(value.symbol, "SELL", value.last,
-                                    value.ask)
+                        if (
+                            long_position_number > short_position_number or
+                            (
+                                long_position_number == short_position_number and
+                                time.time >= app.last_trade_time + 600
+                            )
+                        ):
+                            cancel_other_orders(value.symbol, 'SELL')
+                            place_order(value.symbol, "SELL", value.last,
+                                        value.ask)
                         break
                 except KeyError:
                     pass
@@ -501,9 +516,16 @@ def manage_orders():
                             risk_check_position(value, 'BUY') and
                             value.symbol not in not_trade_symbols
                     ):
-                        cancel_other_orders(value.symbol, 'BUY')
-                        place_order(value.symbol, "BUY", value.last, value.bid)
-                        break
+                        if (
+                            long_position_number < short_position_number or
+                            (
+                                long_position_number == short_position_number and
+                                time.time >= app.last_trade_time + 600
+                            )
+                        ):
+                            cancel_other_orders(value.symbol, 'BUY')
+                            place_order(value.symbol, "BUY", value.last, value.bid)
+                            break
                 except KeyError:
                     pass
 
