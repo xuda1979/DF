@@ -32,7 +32,6 @@ position_end = False
 open_order_end = False
 not_trade_symbols = ['SPY']
 
-
 import datetime
 # BDay is business day, not birthday...
 from pandas.tseries.offsets import BDay
@@ -95,7 +94,6 @@ class TradingAPI(EWrapper, EClient):
         if contract.secType == 'STK' and account == glob_account:
             self.positions[contract.symbol] = position
 
-
     # ! [position]
 
     @iswrapper
@@ -144,6 +142,7 @@ class TradingAPI(EWrapper, EClient):
             del self.open_orders[orderId]
             self.last_trade_time = time.time()
             self.open_order_end = False
+            self.position_end = False
 
             # ! [orderstatus]
 
@@ -184,7 +183,6 @@ class TradingAPI(EWrapper, EClient):
     #     #super().error(reqId, errorCode, errorString)
     #     global error_stream
     #     error_stream.write(f"Error. Id:, {reqId}, Code: {errorCode}, Msg: {errorString}\n")
-
 
 
 app = TradingAPI()
@@ -271,11 +269,12 @@ def req_open_orders():
     while True:
         time.sleep(3)
         app.open_order_end = False
+        app.open_orders = {}
         app.reqOpenOrders()
 
 
-def request_market_data(symbol):
-    global app, id_equity_info_mp, total_requests, market_data_id, requested_symbols
+def req_market_data(symbol):
+    global app, id_equity_info_mp, total_requests, market_data_id
 
     if not symbol in requested_symbols:
         contract = Contract()
@@ -295,8 +294,9 @@ def request_market_data(symbol):
         total_requests += 1
 
 
-def init_request_market_data():
-    global app, id_equity_info_mp, total_requests, market_data_id, symbols, requested_symbols
+def init_req_market_data():
+    global app, id_equity_info_mp, total_requests, market_data_id, symbols
+    global requested_symbols
     while True:
         time.sleep(sleep_interval)
 
@@ -311,13 +311,13 @@ def init_request_market_data():
 
                 contract.currency = 'USD'
                 app.reqHistoricalData(
-                    market_data_id, contract, '', '2 D', '1 day', 'TRADES', 1, 1, False, []
+                    market_data_id, contract, '', '2 D', '1 day', 'TRADES', 1,
+                    1, False, []
                 )
                 app.reqMktData(market_data_id, contract, '', False, False, [])
                 id_equity_info_mp[market_data_id] = equity_info(symbol)
                 market_data_id += 1
                 total_requests += 1
-
 
 
 def req_positions():
@@ -343,13 +343,15 @@ def get_num_buy_and_sell_orders():
     global app
     num_buy_orders = 0
     num_sell_orders = 0
-
-    for id, order in app.open_orders.items():
-        if order.action == 'BUY':
-            num_buy_orders += 1
-        if order.action == 'SELL':
-            num_sell_orders += 1
-    return num_buy_orders, num_sell_orders
+    if app.open_order_end:
+        for id, order in app.open_orders.items():
+            if order.action == 'BUY':
+                num_buy_orders += 1
+            if order.action == 'SELL':
+                num_sell_orders += 1
+        return num_buy_orders, num_sell_orders
+    else:
+        return -1, -1
 
 
 def cancel_other_orders(symbol, action):
@@ -359,14 +361,11 @@ def cancel_other_orders(symbol, action):
     input argument. For orders with the same symbol, cancel far orders.
     return True if the wanted order already existed."""
     global app
-    if not app.open_order_end:
-        for id in list(app.open_orders.keys()):
-            order = app.open_orders[id]
-            if order.action == action:
-                if order.contract.symbol != symbol:
-                    cancel_orders(id)
-
-        time.sleep(1)
+    if app.open_order_end:
+        for orderId in list(app.open_orders.keys()):
+            order = app.open_orders[orderId]
+            if order.action == action and order.contract.symbol != symbol:
+                cancel_orders(orderId)
 
 
 def check_order_existed(symbol, action):
@@ -414,10 +413,12 @@ def liquidate_positions():
             count_long_short_positions()
         )
         num_buy_orders, num_sell_orders = get_num_buy_and_sell_orders()
+        if num_buy_orders == -1:
+            continue
 
         for symbol, position in app.positions.items():
             if symbol not in requested_symbols:
-                request_market_data(symbol)
+                req_market_data(symbol)
                 break
             values_ls = list(id_equity_info_mp.values())
             for value in values_ls:
@@ -426,7 +427,6 @@ def liquidate_positions():
                         value.bid > 0 and value.ask > 0 and value.last > 0
                         and value.predict != -2
                 ):
-
 
                     if (
                             position < 0 and
@@ -478,14 +478,17 @@ def manage_orders():
     global id_equity_info_mp, app, order_id
     while True:
         time.sleep(1)
+        if not app.open_order_end or not app.position_end:
+            continue
         now = datetime.datetime.now()
         long_position_number, short_position_number = (
             count_long_short_positions()
         )
+
         if (
-            len(id_equity_info_mp) >= 80 and
-            trading_hour_start <= now.hour <= trading_hour_end and
-            trading_minute_start <= now.minute <= trading_minute_end
+                len(id_equity_info_mp) >= 80 and
+                trading_hour_start <= now.hour <= trading_hour_end and
+                trading_minute_start <= now.minute <= trading_minute_end
         ):
             id_equity_info_mp = sort_equity()
             for key in list(id_equity_info_mp):
@@ -496,11 +499,11 @@ def manage_orders():
                             value.symbol not in not_trade_symbols
                     ):
                         if (
-                            long_position_number > short_position_number or
-                            (
-                                long_position_number == short_position_number and
-                                time.time >= app.last_trade_time + 600
-                            )
+                                long_position_number > short_position_number or
+                                (
+                                        long_position_number == short_position_number and
+                                        time.time() >= app.last_trade_time + 600
+                                )
                         ):
                             cancel_other_orders(value.symbol, 'SELL')
                             place_order(value.symbol, "SELL", value.last,
@@ -517,14 +520,15 @@ def manage_orders():
                             value.symbol not in not_trade_symbols
                     ):
                         if (
-                            long_position_number < short_position_number or
-                            (
-                                long_position_number == short_position_number and
-                                time.time >= app.last_trade_time + 600
-                            )
+                                long_position_number < short_position_number or
+                                (
+                                        long_position_number == short_position_number and
+                                        time.time() >= app.last_trade_time + 600
+                                )
                         ):
                             cancel_other_orders(value.symbol, 'BUY')
-                            place_order(value.symbol, "BUY", value.last, value.bid)
+                            place_order(value.symbol, "BUY", value.last,
+                                        value.bid)
                             break
                 except KeyError:
                     pass
@@ -533,9 +537,10 @@ def manage_orders():
 def place_order(symbol, action, last_price, limit_price, position=None):
     global app, order_id, dollars
 
-    if last_price < 0 or limit_price < 0:
+    if not app.open_order_end or app.position_end:
         return
-    if not app.open_order_end:
+
+    if last_price < 0 or limit_price < 0:
         return
 
     if check_order_existed(symbol, action):
@@ -572,6 +577,7 @@ def cancel_orders(id):
     global app
     app.cancelOrder(id)
     app.open_order_end = False
+    del app.open_orders[id]
     app.reqOpenOrders()
 
 
@@ -673,7 +679,7 @@ def status_monitor():
 
         if choice == '8':
             print(error_stream.getvalue())
-            #print('Error', file=error_stream)
+            # print('Error', file=error_stream)
 
 
 app.connect('127.0.0.1', 7497, 123)
@@ -683,7 +689,7 @@ time.sleep(sleep_interval)
 api_thread = threading.Thread(target=run_loop, daemon=True)
 api_thread.start()
 
-marketdata_thread = threading.Thread(target=init_request_market_data)
+marketdata_thread = threading.Thread(target=init_req_market_data)
 marketdata_thread.start()
 
 req_open_orders_thread = threading.Thread(target=req_open_orders)
