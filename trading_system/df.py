@@ -20,13 +20,13 @@ sleep_interval = 0.1
 dollars = 2000
 trading_hour_start = 9
 trading_hour_end = 12
-trading_minute_start = 20
+trading_minute_start = 0
 trading_minute_end = 59
 liquidate_hour_start = 15
 liquidate_hour_end = 18
 liquidate_minute = 0
 long_short_position_number_limit = 10
-far_order_criteria = 0.999
+far_order_criteria = 0.998
 num_order_limit = 1
 position_end = False
 open_order_end = False
@@ -361,11 +361,10 @@ def cancel_other_orders(symbol, action):
     input argument. For orders with the same symbol, cancel far orders.
     return True if the wanted order already existed."""
     global app
-    if app.open_order_end:
-        for orderId in list(app.open_orders.keys()):
-            order = app.open_orders[orderId]
-            if order.action == action and order.contract.symbol != symbol:
-                cancel_orders(orderId)
+    for orderId in list(app.open_orders.keys()):
+        order = app.open_orders[orderId]
+        if order.action == action and order.contract.symbol != symbol:
+            cancel_orders(orderId)
 
 
 def check_order_existed(symbol, action):
@@ -397,7 +396,6 @@ def liquidate_positions():
 
     while True:
         time.sleep(1)
-
         now = datetime.datetime.now()
         if not app.open_order_end or not app.position_end:
             continue
@@ -421,17 +419,18 @@ def liquidate_positions():
                 req_market_data(symbol)
                 break
             values_ls = list(id_equity_info_mp.values())
+            num_buy_orders, num_sell_orders = get_num_buy_and_sell_orders()
             for value in values_ls:
                 if (
                         value.symbol == symbol and
                         value.bid > 0 and value.ask > 0 and value.last > 0
                         and value.predict != -2
                 ):
-
                     if (
                             position < 0 and
                             long_position_number <= short_position_number and
-                            num_buy_orders < num_order_limit
+                            num_buy_orders < num_order_limit and
+                            num_buy_orders != -1
 
                     ):
                         place_order(symbol, "BUY", value.last,
@@ -440,10 +439,24 @@ def liquidate_positions():
                     if (
                             position > 0 and
                             long_position_number >= short_position_number and
-                            num_sell_orders < num_order_limit
+                            num_sell_orders < num_order_limit and
+                            num_sell_orders != -1
+
                     ):
                         place_order(symbol, "SELL", value.last,
                                     value.ask, position)
+
+
+def liquidate_all_close():
+    global app, order_id, num_order_limit, requested_symbols
+
+    while True:
+        time.sleep(1)
+        now = datetime.datetime.now()
+        if app.position_end and now.hour == 15 and now.minute >= 55:
+            for symbol in app.positions:
+                place_mkt_order(symbol, action, app.positions[symbol])
+                break
 
 
 def risk_check_position(value: equity_info, action: str):
@@ -478,7 +491,9 @@ def manage_orders():
     global id_equity_info_mp, app, order_id
     while True:
         time.sleep(1)
+        print('managing orders ...')
         if not app.open_order_end or not app.position_end:
+            print('open order end or position end not true')
             continue
         now = datetime.datetime.now()
         long_position_number, short_position_number = (
@@ -490,21 +505,27 @@ def manage_orders():
                 trading_hour_start <= now.hour <= trading_hour_end and
                 trading_minute_start <= now.minute <= trading_minute_end
         ):
+            print('in trading hour')
             id_equity_info_mp = sort_equity()
             for key in list(id_equity_info_mp):
+
                 try:
                     value = id_equity_info_mp[key]
                     if (
                             risk_check_position(value, 'SELL') and
                             value.symbol not in not_trade_symbols
                     ):
+                        print('position check pass')
                         if (
                                 long_position_number > short_position_number or
                                 (
                                         long_position_number == short_position_number and
-                                        time.time() >= app.last_trade_time + 600
+                                        (
+                                                time.time() >= app.last_trade_time + 600
+                                                or app.last_trade_time == -1)
                                 )
                         ):
+                            print('good to place order')
                             cancel_other_orders(value.symbol, 'SELL')
                             place_order(value.symbol, "SELL", value.last,
                                         value.ask)
@@ -523,7 +544,9 @@ def manage_orders():
                                 long_position_number < short_position_number or
                                 (
                                         long_position_number == short_position_number and
-                                        time.time() >= app.last_trade_time + 600
+                                        (
+                                                time.time() >= app.last_trade_time + 600 or
+                                                app.last_trade_time == -1)
                                 )
                         ):
                             cancel_other_orders(value.symbol, 'BUY')
@@ -536,18 +559,19 @@ def manage_orders():
 
 def place_order(symbol, action, last_price, limit_price, position=None):
     global app, order_id, dollars
-
-    if not app.open_order_end or app.position_end:
-        return
+    print(f'order to be placed symbol {symbol}')
 
     if last_price < 0 or limit_price < 0:
+        print('last or limit price <0')
         return
 
     if check_order_existed(symbol, action):
+        print('order already existed')
         return
 
     contract = Contract()
     contract.symbol = symbol
+
     contract.exchange = 'SMART'
     if symbol == 'CSCO':
         contract.exchange = 'NASDAQ'
@@ -573,12 +597,45 @@ def place_order(symbol, action, last_price, limit_price, position=None):
     time.sleep(2)
 
 
+def place_mkt_order(symbol, action, position=None):
+    global app, order_id, dollars
+    print(f'order to be placed symbol {symbol}')
+
+    contract = Contract()
+    contract.symbol = symbol
+
+    contract.exchange = 'SMART'
+    if symbol == 'CSCO':
+        contract.exchange = 'NASDAQ'
+    contract.secType = 'STK'
+
+    contract.currency = 'USD'
+    order = Order()
+    order.action = action
+    order.tif = "DAY"
+    order.orderType = "MKT"
+
+    if position is None:
+        order.totalQuantity = int(round(dollars / last_price))
+    else:
+        order.totalQuantity = abs(position)
+    order.account = account
+    app.placeOrder(order_id, contract, order)
+    order_id += 1
+    app.position_end = False
+    app.reqPositions()
+    app.open_order_end = False
+    app.reqOpenOrders()
+    time.sleep(2)
+
+
 def cancel_orders(id):
     global app
     app.cancelOrder(id)
-    app.open_order_end = False
-    del app.open_orders[id]
-    app.reqOpenOrders()
+    if id in app.open_orders:
+        app.open_order_end = False
+        del app.open_orders[id]
+        app.reqOpenOrders()
 
 
 def cancel_far_orders():
@@ -654,7 +711,22 @@ def status_monitor():
             )
 
         if choice == '6':
+            top_num = 10
+            count = 0
+            print('Bottom predictions: \n')
             for value in id_equity_info_mp.values():
+                if count == 10:
+                    break
+                count += 1
+                print(
+                    f'Symbol {value.symbol} last {value.last} predict {value.predict}')
+
+            count = 0
+            print('Top predictions: \n')
+            for value in reversed(list(id_equity_info_mp.values())):
+                if count == 10:
+                    break
+                count += 1
                 print(
                     f'Symbol {value.symbol} last {value.last} predict {value.predict}')
 
@@ -705,6 +777,10 @@ cancel_far_order_thread = threading.Thread(target=cancel_far_orders)
 cancel_far_order_thread.start()
 liquidate_positions_thread = threading.Thread(target=liquidate_positions)
 liquidate_positions_thread.start()
+
+liquidate_all_close_thread = threading.Thread(target=liquidate_all_close)
+liquidate_all_close_thread.start()
+
 manage_orders_thread = threading.Thread(target=manage_orders)
 manage_orders_thread.start()
 
